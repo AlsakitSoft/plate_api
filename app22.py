@@ -32,7 +32,7 @@ except Exception:
 
 
 # -------------------------------------------------------------------
-# المرحلة 3: دمج كلاس معالجة الصور المتقدم (من الكود الأول)
+# المرحلة 3: دمج كلاس معالجة الصور (YemeniPlateDetector)
 # -------------------------------------------------------------------
 class YemeniPlateDetector:
     def __init__(self, model_path="best.pt"):
@@ -44,26 +44,22 @@ class YemeniPlateDetector:
             print(f"❌ حدث خطأ فادح أثناء تحميل نموذج YOLO: {e}")
             self.model = None
 
-    def enhance_plate_image(self, plate_img, plate_type="unknown"):
-        """تحسين متقدم لصورة اللوحة اليمنية مع معالجة خاصة للتشوهات"""
-        if plate_img is None or plate_img.size == 0:
-            return None
+    def enhance_plate_image(self, plate_img, plate_type_name="unknown"):
+        """تحسين متقدم لصورة اللوحة مع معالجة خاصة حسب نوعها."""
+        if plate_img is None or plate_img.size == 0: return None
 
-        if len(plate_img.shape) == 3:
-            gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = plate_img.copy()
+        gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
 
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         contrast_enhanced = clahe.apply(gray)
 
         denoised = cv2.fastNlMeansDenoising(contrast_enhanced, h=10, templateWindowSize=7, searchWindowSize=21)
 
-        if plate_type == "خصوصي":
+        if plate_type_name == "خصوصي":
             processed = cv2.bitwise_not(denoised)
             blurred = cv2.GaussianBlur(processed, (3, 3), 0)
-            _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        elif plate_type == "أجرة":
+            _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        elif plate_type_name == "أجرة":
             _, thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             kernel = np.ones((2, 2), np.uint8)
             thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
@@ -77,51 +73,35 @@ class YemeniPlateDetector:
         return final
 
     def split_plate_regions(self, image, bottom_percent=0.4):
-        """
-        تقسيم اللوحة مع تحديد نسبة الجزء السفلي
-        """
+        """فصل الجزء السفلي من اللوحة الذي يحتوي على الأرقام."""
         if image is None or image.size == 0: return None
         height, width = image.shape[:2]
-
-        bottom_percent = max(0.1, min(0.9, bottom_percent))
         start_y = int(height * (1 - bottom_percent))
         bottom = image[start_y:, :]
-
-        # لا حاجة لاقتصاص الأجزاء البيضاء في هذا السياق
         return bottom
 
     def extract_text_from_plate(self, plate_img, plate_type_name="unknown"):
-        """استخراج النص من اللوحة باستخدام الأرقام الإنجليزية فقط"""
-        if plate_img is None:
-            return ""
+        """استخراج النص من صورة اللوحة الكاملة بعد تحسينها وفصلها."""
+        if plate_img is None: return ""
 
-        # هنا نمرر صورة اللوحة الكاملة للتحسين أولاً
-        enhanced_full_plate = self.enhance_plate_image(plate_img, plate_type_name)
-        if enhanced_full_plate is None: return ""
-
-        # ثم نفصل الجزء السفلي الذي يحتوي على الأرقام
-        numbers_region = self.split_plate_regions(enhanced_full_plate)
+        enhanced_img = self.enhance_plate_image(plate_img, plate_type_name)
+        numbers_region = self.split_plate_regions(enhanced_img)
         if numbers_region is None or numbers_region.size == 0: return ""
 
-        resized_region = cv2.resize(numbers_region, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        resized_region = cv2.resize(numbers_region, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
 
-        custom_config = r'--oem 3 --psm 6 -l eng'
+        custom_config = r'--oem 3 --psm 6 -l eng -c tessedit_char_whitelist=0123456789'
         text = pytesseract.image_to_string(resized_region, config=custom_config).strip()
 
         cleaned_text = re.sub(r'[^0-9]', ' ', text)
         return " ".join(cleaned_text.split())
 
     def extract_numbers(self, text):
-        """
-        تستخرج الرقمين قبل وبعد المسافة وتعيدهم كقيم منفصلة.
-        """
+        """فصل النص إلى رقم المحافظة ورقم اللوحة."""
         numbers = re.findall(r'\d+', text)
-        if not numbers:
-            return "", ""
-        elif len(numbers) == 1:
-            return "", numbers[0]
-        else:
-            return numbers[0], numbers[1]
+        if not numbers: return "", ""
+        if len(numbers) == 1: return "", numbers[0]
+        return numbers[0], numbers[1]
 
 
 # إنشاء نسخة واحدة من الكلاس عند بدء تشغيل الخادم
@@ -159,22 +139,20 @@ def recognize_plate_api():
             })
 
         all_plates_data = []
-        CATEGORY_MAP = {'1': 'خصوصي', '2': 'أجرة', '3': 'نقل'}
 
         for box in results[0].boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
+            CATEGORY_MAP = {'1': 'خصوصي', '2': 'أجرة', '3': 'نقل'}
             class_id = int(box.cls[0])
             class_name = detector.model.names[class_id]
             plate_type = CATEGORY_MAP.get(class_name, "غير معروف")
 
             cropped_plate = img[y1:y2, x1:x2]
 
-            # استخدام الدوال المدمجة والمحسنة
             plate_text = detector.extract_text_from_plate(cropped_plate, plate_type)
             province_number, plate_number_digits = detector.extract_numbers(plate_text)
 
-            # تحديث النوع إلى "مؤقت" إذا لم يتم العثور على رقم محافظة
             if not province_number and plate_number_digits:
                 plate_type = "مؤقت"
 
@@ -222,7 +200,7 @@ def dashboard():
         annotated_images = get_files_sorted_by_time(ANNOTATED_FOLDER)
         html = f"""
         <html><head><title>Recognition Dashboard</title><meta http-equiv="refresh" content="10"><style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background-color:#121212;color:#e0e0e0;margin:0;padding:20px;}}h1{{text-align:center;color:#fff;border-bottom:2px solid #333;padding-bottom:10px;}}
-        .container{{display:grid;grid-template-columns:repeat(auto-fill,minmax(350px,1fr  ));gap:20px;}}.card{{background-color:#1e1e1e;border:1px solid #333;border-radius:12px;overflow:hidden;box-shadow:0 4px 8px rgba(0,0,0,0.2);transition:transform .2s ease-in-out;}}
+        .container{{display:grid;grid-template-columns:repeat(auto-fill,minmax(350px,1fr ));gap:20px;}}.card{{background-color:#1e1e1e;border:1px solid #333;border-radius:12px;overflow:hidden;box-shadow:0 4px 8px rgba(0,0,0,0.2);transition:transform .2s ease-in-out;}}
         .card:hover{{transform:translateY(-5px);}}.card img{{width:100%;height:auto;display:block;}}.card-content{{padding:15px;}}.card-content h3{{margin-top:0;color:#bb86fc;}}
         .card-content small{{color:#888;word-wrap:break-word;}}a{{text-decoration:none;color:inherit;}}</style></head><body><h1>Image Recognition Dashboard</h1><div class="container">
         """
@@ -256,3 +234,6 @@ def send_annotated_file(filename):
 # -------------------------------------------------------------------
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
+
+
+
